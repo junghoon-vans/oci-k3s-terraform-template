@@ -1,9 +1,9 @@
 # Contributing
 
 This is a template repo: nothing here is wired up to a live GitOps pipeline or
-a real running cluster. If you clone/fork this to run your own cluster, the
-guidance below describes the workflow this repo is built around -- adapt it
-to however you actually deploy.
+a real running cluster. CI keeps that distinction: pull requests receive
+credential-free Terraform checks, while trusted planning and applying are
+available only from `main` after you configure the GitHub environments below.
 
 ## Workflow
 
@@ -13,34 +13,45 @@ to however you actually deploy.
 
    ```bash
    terraform fmt -recursive
+   terraform init -backend=false -input=false -lockfile=readonly
    terraform validate
    ```
 
-4. Open a PR. If you've configured the [CI/CD secrets](./README.md#cicd), the
-   `plan` GitHub Actions job runs `fmt -check`, `validate`, and `plan`
-   automatically, and posts the plan as a PR comment.
-5. **Read the plan comment before merging** if your fork has `apply` wired up
-   to run automatically on merge (see the README) -- that's the only review
-   step before real infrastructure changes land.
-6. Merge, then confirm the node(s) you changed reach `Ready` (see
+4. Open a PR. CI runs `fmt -check`, initializes providers/modules with
+   `-backend=false` and the committed lockfile, then validates. It has no OCI
+   credentials and does not read remote state or create a plan.
+5. Merge after the checks pass. A push to `main` runs a trusted plan only if
+   credentials are configured; review the workflow summary before deciding
+   whether to apply.
+6. To apply an explicitly approved change, manually dispatch the Terraform
+   workflow on `main` with `operation=apply`. It creates a fresh plan, retains
+   that exact plan artifact for one day, and waits at `terraform-apply` for
+   required reviewer approval before applying it. Confirm the run succeeds and
+   that the changed node(s) reach `Ready` (see
    [Verification](./README.md#verification)).
+
+Configure `terraform-plan` to allow deployments from `main` and add its OCI
+and backend secrets. Configure `terraform-apply` to allow deployments from
+`main`, add the same secrets, and require reviewer approval. GitHub environment
+protection is external to the workflow YAML; without required reviewers on
+`terraform-apply`, the manual apply is not approval-gated. A fresh template
+without `OCI_TENANCY_OCID` in `terraform-plan` skips trusted plan/apply jobs.
 
 ## What a healthy plan looks like
 
 For a small change (e.g. resizing a boot volume, tweaking a security rule),
 expect a small, targeted diff -- a handful of resources added/changed, ideally
-zero destroyed. Treat any of these as a stop-and-investigate signal, not
-something to merge through:
+zero destroyed. Treat any of these as a stop-and-investigate signal before
+manually dispatching an apply:
 
 - A plan that wants to **recreate resources that already exist** (e.g. the
-  whole VCN, existing instances). This almost always means Terraform can't
-  see the real remote state -- check that `terraform init` actually bound to
-  the `oci` backend (a `Warning: Missing backend configuration` line in the
-  init log means it silently fell back to local state, usually because no
-  `backend "oci" {}` block exists in the committed config).
+  whole VCN or existing instances). This usually means Terraform cannot see
+  the real remote state. Check that trusted Terraform init uses the intended
+  OCI backend; do not approve/apply until resolved.
 - Any unexpected `destroy` of `module.compute.oci_core_instance.this[...]`,
   the VCN, or the NLB.
 - A plan far larger than your actual diff would suggest.
+
 
 ## Always Free budget
 
@@ -59,11 +70,10 @@ tradeoff:
 - **AMD compute**: 2 x `E2.1.Micro` = the full Always Free AMD micro instance
   limit (2 instances). A third is billed.
 
-## Secrets
-
-If you wire up the CI workflow, don't add `terraform.tfvars` or `backend.hcl`
-to git -- set values as repository secrets (see the table in
-[README.md](./README.md#cicd)) or keep your own local, gitignored copies.
+PR validation has no access to OCI credentials. Trusted plan/apply uses OCI
+and backend secrets scoped to both the `terraform-plan` and `terraform-apply`
+GitHub environments. Keep `terraform.tfvars`, `backend.hcl`, and keys out of
+git; see [README.md](./README.md#cicd) for the environment setup.
 
 ## Commit style
 
