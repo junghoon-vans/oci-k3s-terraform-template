@@ -43,7 +43,9 @@ nodes or larger disks):
 ├── CLAUDE.md -> AGENTS.md
 ├── backend.tf
 ├── backend.hcl.example
+├── .terraform.lock.hcl
 ├── CONTRIBUTING.md
+├── renovate.json
 ├── main.tf
 ├── nlb.tf
 ├── outputs.tf
@@ -104,33 +106,54 @@ terraform apply tfplan
 
 ## CI/CD
 
-`.github/workflows/terraform.yml` is a reference GitHub Actions pipeline. A
-`check-secrets` job checks for `OCI_TENANCY_OCID`; `plan` and `apply` both
-`needs: check-secrets` and report as genuinely **Skipped** (not a red X) if
-it isn't set, so a fresh clone/fork stays clean until you've configured
-anything. Configure the secrets below for your own OCI tenancy to actually
-run it:
+`.github/workflows/terraform.yml` separates untrusted PR checks from trusted
+OCI operations:
 
-- Pull requests touching `**.tf` / `**.tftpl`: `terraform fmt -check`, `validate`, and
-  `plan`, with the plan posted as a PR comment.
-- Push to `main` (i.e. merging a PR): `terraform plan` followed immediately by
-  `terraform apply -auto-approve`, fully automatic. There is no manual approval gate --
-  GitHub's "required reviewers" environment protection needs a paid plan for private
-  repos, so review happens at the PR stage (read the plan comment before merging).
-  Read a healthy-vs-unhealthy plan checklist in [CONTRIBUTING.md](./CONTRIBUTING.md#what-a-healthy-plan-looks-like)
-  before merging anything.
-- `workflow_dispatch` is also available for an ad-hoc plan+apply run outside of a merge.
+- Pull requests run `terraform fmt -check -recursive`, `terraform init
+  -backend=false -input=false -lockfile=readonly`, and `terraform validate`.
+  This job has no OCI secrets, does not read remote state, and does not create
+  a plan.
+- A push to `main` runs a trusted plan only when OCI credentials are
+  configured. Review the plan in the workflow summary; merging never applies
+  automatically.
+- `workflow_dispatch` is restricted by job guards to `main` and offers
+  `operation=plan` (the default) or `operation=apply`. Apply depends on a
+  successful trusted plan, retains that exact plan artifact for one day, and
+  waits for approval from the protected `terraform-apply` environment.
+- The workflow pins Terraform 1.17.0 and GitHub Actions by full commit SHA.
+  Workflow permissions are read-only and jobs are serialized per ref.
 
-Required repository secrets (no `terraform.tfvars` or `backend.hcl` are committed, so
-CI sources every value from secrets):
+The saved plan artifact is encrypted before upload using a key derived from
+`OCI_PRIVATE_KEY`; the plaintext plan is not uploaded. Set byte-identical
+`OCI_PRIVATE_KEY` values in `terraform-plan` and `terraform-apply`. If the key
+changes between plan and apply, decryption fails; start a new `workflow_dispatch`
+with `operation=apply` to generate a fresh plan and matching encrypted artifact.
 
-| Secret | Maps to |
+### Required GitHub environment setup
+
+Environment protections are external GitHub settings; workflow YAML only names
+the environments and cannot configure their branch restrictions or approvals.
+Before using trusted operations:
+
+1. Create `terraform-plan`, restrict deployment branches to `main`, and do not
+   require reviewers for this planning-only environment.
+2. Create `terraform-apply`, restrict deployment branches to `main`, require
+   at least one reviewer (and prevent self-review where available), and add
+   the same secrets as `terraform-plan`.
+3. Add the secrets from the table below to **both** environments. The
+   workflow uses environment-scoped secrets, not repository-wide secrets.
+
+If `terraform-apply` is not configured with required reviewers, its manual
+dispatch is not approval-gated. Without `OCI_TENANCY_OCID` in `terraform-plan`,
+trusted plan/apply jobs are skipped; PR validation continues to run.
+
+| Environment secret | Maps to |
 | --- | --- |
 | `OCI_TENANCY_OCID` | `tenancy_ocid` |
 | `OCI_USER_OCID` | `user_ocid` |
 | `OCI_FINGERPRINT` | `fingerprint` |
-| `OCI_PRIVATE_KEY` | contents of the API signing key PEM (written to a temp file as `private_key_path`) |
-| `OCI_REGION` | `region` |
+| `OCI_PRIVATE_KEY` | OCI API signing key PEM (written to a temporary file as `private_key_path`) |
+| `OCI_REGION` | `region` and backend `region` |
 | `OCI_COMPARTMENT_OCID` | `compartment_ocid` |
 | `OCI_SSH_AUTHORIZED_KEYS` | `ssh_authorized_keys` |
 | `OCI_ARM_IMAGE_OCID` | `image_ocid` |
@@ -138,11 +161,43 @@ CI sources every value from secrets):
 | `K3S_TOKEN` | `k3s_token` |
 | `TAILSCALE_AUTH_KEY_SERVER` | `tailscale_auth_key_server` |
 | `TAILSCALE_AUTH_KEY_AGENT` | `tailscale_auth_key_agent` |
-| `TF_STATE_BUCKET` | backend `bucket` |
-| `TF_STATE_NAMESPACE` | backend `namespace` |
+| `TF_STATE_BUCKET` | OCI backend `bucket` |
+| `TF_STATE_NAMESPACE` | OCI backend `namespace` |
 
-Set secrets with `gh secret set NAME --repo <owner>/<repo> < file` (for the PEM
-key) or `gh secret set NAME --repo <owner>/<repo> --body "value"`.
+Set environment secrets in repository Settings → Environments, or with
+`gh secret set NAME --repo <owner>/<repo> --env terraform-plan` and repeat with
+`--env terraform-apply`. For `OCI_PRIVATE_KEY`, read the value from a file;
+never commit the PEM file.
+
+Manually request a plan or an approved apply from `main`:
+
+```bash
+gh workflow run terraform.yml --ref main -f operation=plan
+gh workflow run terraform.yml --ref main -f operation=apply
+```
+
+Keep `terraform.tfvars` and `backend.hcl` local and gitignored. Do not use PR
+comments or PR workflow output as a trusted plan; trusted plan summaries are
+available only on main-ref workflow runs.
+
+### Dependency updates
+
+Renovate checks weekly (Monday, UTC) and opens reviewable pull requests; it
+does not auto-merge Terraform providers or GitHub Actions. The tracked
+`.terraform.lock.hcl` selects `oracle/oci` 6.37.0 under the existing `~> 6.0`
+constraint and includes publisher checksums for `linux_amd64`, `linux_arm64`,
+and `darwin_arm64`. If you intentionally change the provider selection,
+regenerate checksums for all supported CI/local platforms:
+
+```bash
+terraform init -upgrade -backend=false -input=false
+terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64
+```
+
+Renovate's separate high-risk k3s pin PR changes only the version rendered
+into cloud-init for bootstrap. Existing instances ignore metadata/user-data
+changes, so this pin change does not automatically upgrade running nodes.
+
 
 ## Outputs
 

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["terraform", "github-actions", "custom.regex"],
+  "timezone": "UTC",
+  "schedule": ["* 0-4 * * 1"],
+  "automerge": false,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["* 0-4 * * 1"]
+  },
+  "packageRules": [
+    {
+      "description": "Terraform provider and GitHub Actions updates always require human review",
+      "matchManagers": ["terraform", "github-actions"],
+      "automerge": false
+    },
+    {
+      "description": "Keep k3s bootstrap updates isolated and explicitly high risk",
+      "matchPackageNames": ["k3s-io/k3s"],
+      "automerge": false,
+      "groupName": "k3s bootstrap-only (high-risk manual review)",
+      "prBodyNotes": [
+        "**High-risk, bootstrap-only update:** this changes the k3s version rendered into cloud-init for instance creation/rebuild. The compute module ignores OCI instance metadata changes, so this does not upgrade existing nodes. Review this dependency update independently. Any apply must be manually dispatched and approved through the `terraform-apply` environment, which must be configured with required reviewers."
+      ]
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track the k3s version used only by cloud-init bootstrap",
+      "managerFilePatterns": ["/^variables\\.tf$/"],
+      "matchStrings": [
+        "variable\\s+\"k3s_version\"\\s*\\{[\\s\\S]*?default\\s*=\\s*\"(?<currentValue>v\\d+\\.\\d+\\.\\d+\\+k3s\\d+)\""
+      ],
+      "depNameTemplate": "k3s-io/k3s",
+      "packageNameTemplate": "k3s-io/k3s",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)\\+k3s(?<build>\\d+)$"
+    }
+  ]
+}
